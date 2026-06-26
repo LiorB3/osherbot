@@ -26,6 +26,10 @@ listening_channels: dict[int, int] = {}
 tts_enabled_guilds: set[int] = set()
 ai_enabled_guilds: set[int] = set()
 
+# Rolling conversation history per guild — max 3 exchanges (6 entries: user+assistant pairs)
+MAX_HISTORY = 3
+conversation_history: dict[int, list[dict]] = {}
+
 
 def load_opus_lib():
     if opus.is_loaded():
@@ -85,6 +89,7 @@ HELP_EN = (
     "`bot ai on/off` — toggle AI replies\n"
     "`bot seturl <url>` — set ngrok/Ollama URL\n"
     "`bot setmodel <model>` — switch Ollama model\n"
+    "`bot clear` — wipe AI memory\n"
     "`bot status` — show current state\n"
     "`bot help` — show this list"
 )
@@ -99,6 +104,7 @@ HELP_HE = (
     "`bot ai on/off` — הפעל/כבה תגובות AI\n"
     "`bot seturl <url>` — הגדר כתובת ngrok/Ollama\n"
     "`bot setmodel <מודל>` — החלף מודל Ollama\n"
+    "`bot clear` — מחק זיכרון AI\n"
     "`bot status` — הצג מצב נוכחי\n"
     "`bot help` — הצג רשימה זו"
 )
@@ -130,12 +136,21 @@ def make_tts_audio(text: str, lang: str, tld: str) -> str:
     return tmp.name
 
 
-async def call_ollama(prompt: str) -> str | None:
+async def call_ollama(prompt: str, guild_id: int) -> str | None:
     if not ollama_url:
         return None
+
+    # Build history-aware prompt
+    history = conversation_history.get(guild_id, [])
+    history_text = ""
+    for entry in history:
+        role = "משתמש" if entry["role"] == "user" else "עוזר"
+        history_text += f"{role}: {entry['content']}\n"
+    full_prompt = history_text + f"משתמש: {prompt}\nעוזר:"
+
     payload = {
         "model": ollama_model,
-        "prompt": prompt,
+        "prompt": full_prompt,
         "stream": False,
         "system": "ענה בעברית בלבד. תשובה קצרה וברורה.",
     }
@@ -153,7 +168,17 @@ async def call_ollama(prompt: str) -> str | None:
                     print(f"Ollama error: HTTP {resp.status} — {body[:300]}", flush=True)
                     return None
                 data = await resp.json()
-                return data.get("response", "").strip()
+                reply = data.get("response", "").strip()
+                if reply:
+                    # Save to rolling history
+                    if guild_id not in conversation_history:
+                        conversation_history[guild_id] = []
+                    conversation_history[guild_id].append({"role": "user", "content": prompt})
+                    conversation_history[guild_id].append({"role": "assistant", "content": reply})
+                    # Keep only last MAX_HISTORY exchanges (2 entries each)
+                    if len(conversation_history[guild_id]) > MAX_HISTORY * 2:
+                        conversation_history[guild_id] = conversation_history[guild_id][-(MAX_HISTORY * 2):]
+                return reply
     except Exception as e:
         print(f"Ollama request failed: {e}", flush=True)
         return None
@@ -268,6 +293,7 @@ async def leave(ctx: commands.Context):
     listening_channels.pop(ctx.guild.id, None)
     tts_enabled_guilds.discard(ctx.guild.id)
     ai_enabled_guilds.discard(ctx.guild.id)
+    conversation_history.pop(ctx.guild.id, None)
     await ctx.voice_client.disconnect()
     await react(ctx.message, "👋")
 
@@ -298,7 +324,10 @@ async def setmodel(ctx: commands.Context, *, model: str):
     await react(ctx.message, "✅")
 
 
-@bot.command(name="ai")
+@bot.command(name="clear")
+async def clear_history(ctx: commands.Context):
+    conversation_history.pop(ctx.guild.id, None)
+    await react(ctx.message, "🧹")
 async def ai_toggle(ctx: commands.Context, state: str):
     state = state.lower()
     hebrew = is_hebrew_ctx(ctx)
@@ -398,7 +427,7 @@ async def on_message(message: discord.Message):
     # AI
     if guild_id in ai_enabled_guilds:
         async with message.channel.typing():
-            reply = await call_ollama(text)
+            reply = await call_ollama(text, guild_id)
         if reply:
             while voice_client.is_playing():
                 await asyncio.sleep(0.3)

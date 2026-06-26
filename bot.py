@@ -229,9 +229,9 @@ async def speak(voice_client: discord.VoiceClient, text: str, lang: str, tld: st
     voice_client.play(discord.FFmpegPCMAudio(path), after=after_play)
 
 
-async def react(message: discord.Message, emoji: str):
+async def confirm(ctx: commands.Context, text: str):
     try:
-        await message.add_reaction(emoji)
+        await ctx.send(text)
     except Exception:
         pass
 
@@ -248,9 +248,9 @@ async def on_ready():
 @bot.event
 async def on_command_error(ctx: commands.Context, error):
     if isinstance(error, commands.CommandNotFound):
-        await react(ctx.message, "❓")
+        pass  # silently ignore unknown commands
     elif isinstance(error, commands.MissingRequiredArgument):
-        await react(ctx.message, "❌")
+        await ctx.send("❌ Missing argument.")
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ async def on_command_error(ctx: commands.Context, error):
 @bot.command(name="join")
 async def join(ctx: commands.Context):
     if ctx.author.voice is None:
-        await react(ctx.message, "❌")
+        await confirm(ctx, "❌ You need to be in a voice channel first.")
         return
     channel = ctx.author.voice.channel
     if ctx.voice_client is not None:
@@ -267,45 +267,45 @@ async def join(ctx: commands.Context):
         await channel.connect()
     listening_channels[ctx.guild.id] = ctx.channel.id
     tts_enabled_guilds.add(ctx.guild.id)
-    await react(ctx.message, "🔊")
+    await confirm(ctx, "🔊 Joined!")
 
 
 @bot.command(name="stop")
 async def stop(ctx: commands.Context):
     tts_enabled_guilds.discard(ctx.guild.id)
-    await react(ctx.message, "🔇")
+    await confirm(ctx, "🔇 TTS paused.")
 
 
 @bot.command(name="start")
 async def start(ctx: commands.Context):
     if ctx.guild.id not in listening_channels:
-        await react(ctx.message, "❌")
+        await confirm(ctx, "❌ Use `bot join` first.")
         return
     tts_enabled_guilds.add(ctx.guild.id)
-    await react(ctx.message, "🔊")
+    await confirm(ctx, "🔊 TTS resumed.")
 
 
 @bot.command(name="leave")
 async def leave(ctx: commands.Context):
     if ctx.voice_client is None:
-        await react(ctx.message, "❌")
+        await confirm(ctx, "❌ I'm not in a voice channel.")
         return
     listening_channels.pop(ctx.guild.id, None)
     tts_enabled_guilds.discard(ctx.guild.id)
     ai_enabled_guilds.discard(ctx.guild.id)
     conversation_history.pop(ctx.guild.id, None)
     await ctx.voice_client.disconnect()
-    await react(ctx.message, "👋")
+    await confirm(ctx, "👋 Left!")
 
 
 @bot.command(name="say")
 async def say_command(ctx: commands.Context, *, message: str):
     if ctx.voice_client is None:
-        await react(ctx.message, "❌")
+        await confirm(ctx, "❌ I'm not in a voice channel. Use `bot join` first.")
         return
     lang, tld, flag = detect_lang_config(message)
     await speak(ctx.voice_client, message, lang, tld)
-    await react(ctx.message, flag)
+    await confirm(ctx, f"{flag} Speaking...")
 
 
 @bot.command(name="seturl")
@@ -313,7 +313,7 @@ async def seturl(ctx: commands.Context, url: str):
     global ollama_url
     ollama_url = url.rstrip("/")
     print(f"Ollama URL updated to: {ollama_url}", flush=True)
-    await react(ctx.message, "✅")
+    await confirm(ctx, f"✅ URL set to `{ollama_url}`")
 
 
 @bot.command(name="setmodel")
@@ -321,34 +321,35 @@ async def setmodel(ctx: commands.Context, *, model: str):
     global ollama_model
     ollama_model = model.strip()
     print(f"Ollama model updated to: {ollama_model}", flush=True)
-    await react(ctx.message, "✅")
+    await confirm(ctx, f"✅ Model set to `{ollama_model}`")
 
 
 @bot.command(name="clear")
 async def clear_history(ctx: commands.Context):
     conversation_history.pop(ctx.guild.id, None)
-    await react(ctx.message, "🧹")
+    await confirm(ctx, "🧹 Memory cleared.")
+
+
+@bot.command(name="ai")
 async def ai_toggle(ctx: commands.Context, state: str):
     state = state.lower()
     hebrew = is_hebrew_ctx(ctx)
     if state == "on":
         if not ollama_url:
-            await react(ctx.message, "❌")
-            msg = "לא הוגדרה כתובת Ollama. השתמש ב `bot seturl <url>`" if hebrew else "No Ollama URL set. Use `bot seturl <url>` first."
-            await ctx.send(msg)
+            msg = "❌ לא הוגדרה כתובת Ollama. השתמש ב `bot seturl <url>`" if hebrew else "❌ No Ollama URL set. Use `bot seturl <url>` first."
+            await confirm(ctx, msg)
             return
         if ctx.guild.id not in listening_channels:
-            await react(ctx.message, "❌")
-            msg = "השתמש ב `bot join` תחילה." if hebrew else "Use `bot join` first."
-            await ctx.send(msg)
+            msg = "❌ השתמש ב `bot join` תחילה." if hebrew else "❌ Use `bot join` first."
+            await confirm(ctx, msg)
             return
         ai_enabled_guilds.add(ctx.guild.id)
-        await react(ctx.message, "🤖")
+        await confirm(ctx, "🤖 AI on!")
     elif state == "off":
         ai_enabled_guilds.discard(ctx.guild.id)
-        await react(ctx.message, "💤")
+        await confirm(ctx, "💤 AI off.")
     else:
-        await react(ctx.message, "❓")
+        await confirm(ctx, "❓ Usage: `bot ai on` or `bot ai off`")
 
 
 @bot.command(name="status")
@@ -419,10 +420,6 @@ async def on_message(message: discord.Message):
     # TTS
     if guild_id in tts_enabled_guilds:
         await speak(voice_client, text, lang, tld)
-        try:
-            await message.add_reaction(flag)
-        except Exception:
-            pass
 
     # AI
     if guild_id in ai_enabled_guilds:
@@ -435,7 +432,7 @@ async def on_message(message: discord.Message):
             await speak(voice_client, reply, r_lang, r_tld)
             await message.channel.send(f"🤖 {reply}")
         else:
-            await react(message, "⚠️")
+            await message.channel.send("⚠️ Ollama did not respond.")
 
 
 bot.run(TOKEN)
